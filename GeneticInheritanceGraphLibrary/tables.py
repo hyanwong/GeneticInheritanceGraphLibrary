@@ -1291,9 +1291,12 @@ class Tables:
         tables.sort()
         return tables
 
-    def find_mrca_regions(self, u, v, time_cutoff=None):
+    def find_mrca_regions(
+        self, u, v, *, u_chromosomes=None, v_chromosomes=None, time_cutoff=None
+    ):
         """
-        Find all regions between nodes u and v that share a most recent
+        Find all regions between nodes u and v (potentially restricted to a list
+        of chromosomes in u and v) that share a most recent
         common ancestor in the GIG which is more recent than time_cutoff.
         Returns a dict of dicts of the following form
             {
@@ -1327,7 +1330,15 @@ class Tables:
            back to the "origin of life"
         6. We have to keep track of the offset of the current interval into the
            original genome, to allow mapping back to the original coordinates
+
+        :param int u: The first node
+        :param int u: The second node
+
         """
+        if u_chromosomes is None:
+            u_chromosomes = list(self.iedges.chromosomes_for_child(u))
+        if v_chromosomes is None:
+            v_chromosomes = list(self.iedges.chromosomes_for_child(v))
         if not isinstance(u, (int, np.integer)) or not isinstance(v, (int, np.integer)):
             raise ValueError("u and v must be integers")
 
@@ -1354,9 +1365,15 @@ class Tables:
         # (and could therefore coalesce), meaning the node is a potential MRCA.
         offset = 0
         # tracked intervals for node u, keyed by offset+orientation (False=not inverted)
-        stack[u] = ({(offset, False): P.closedopen(0, np.inf)}, {})
+        stack[u] = (
+            {c: {(offset, False): P.closedopen(0, np.inf)} for c in u_chromosomes},
+            {},
+        )
         # tracked intervals for node v, keyed by offset+orientation (False=not inverted)
-        stack[v] = ({}, {(offset, False): P.closedopen(0, np.inf)})
+        stack[v] = (
+            {},
+            {c: {(offset, False): P.closedopen(0, np.inf)} for c in v_chromosomes},
+        )
 
         result = collections.defaultdict(P.IntervalDict)
 
@@ -1370,46 +1387,51 @@ class Tables:
             if node_times[child] > time_cutoff:
                 return result
             if len(u_dict) > 0 and len(v_dict) > 0:
-                # check for overlap between all intervals in u_dict and v_dict
-                # which result in coalescence. The coalescent point can be
-                # recorded, and the overlap deleted from the intervals
-                #
-                # Intervals are not currently sorted, so we need to check
-                # all combinations. Note that we could have duplicate positions
-                # even in the same interval list, due to segmental duplications
-                # within a genome. We have to use the portion library here to
-                # cut the MRCA regions into non-overlapping pieces which have different
-                # patterns of descent into u and v
-                coalesced = P.empty()
-                for u_key, u_intervals in u_dict.items():
-                    for i, u_interval in enumerate(u_intervals):
-                        for v_key, v_intervals in v_dict.items():
-                            for j, v_interval in enumerate(v_intervals):
-                                if mrca := u_interval & v_interval:
-                                    coalesced |= mrca
-                                    details = ({(u_key, i)}, {(v_key, j)})
-                                    result[child] = result[child].combine(
-                                        P.IntervalDict({mrca: details}), how=concat
-                                    )
-                if not coalesced.empty:
-                    # Work out the mapping of the mrca intervals into intervals in
-                    # u and v, given keys into the uv_intervals dicts.
-                    for mrca, uv_details in result[child].items():
-                        to_store = MRCAdict.MRCAintervals([], [])
-                        for s, details in zip(to_store, uv_details):
-                            # Odd that we don't use the interval dict here: not sure why
-                            for key, _ in details:
-                                offset, inverted_relative_to_original = key
-                                if inverted_relative_to_original:
-                                    s.append((offset - mrca.lower, offset - mrca.upper))
-                                else:
-                                    s.append((mrca.lower - offset, mrca.upper - offset))
-                        result[child][mrca] = to_store  # replace
+                for chromosome in u_dict.keys() & v_dict.keys():
+                    # check for overlap between all intervals in u_dict and v_dict
+                    # which result in coalescence. The coalescent point can be
+                    # recorded, and the overlap deleted from the intervals
+                    #
+                    # Intervals are not currently sorted, so we need to check
+                    # all combinations. Note that we could have duplicate positions
+                    # even in the same interval list, due to segmental duplications
+                    # within a genome. We have to use the portion library here to
+                    # cut the MRCA regions into non-overlapping pieces which have
+                    # different patterns of descent into u and v
+                    coalesced = P.empty()
+                    for u_key, u_intervals in u_dict[chromosome].items():
+                        for i, u_interval in enumerate(u_intervals):
+                            for v_key, v_intervals in v_dict[chromosome].items():
+                                for j, v_interval in enumerate(v_intervals):
+                                    if mrca := u_interval & v_interval:
+                                        coalesced |= mrca
+                                        details = ({(u_key, i)}, {(v_key, j)})
+                                        result[child] = result[child].combine(
+                                            P.IntervalDict({mrca: details}), how=concat
+                                        )
+                    if not coalesced.empty:
+                        # Work out the mapping of the mrca intervals into intervals in
+                        # u and v, given keys into the uv_intervals dicts.
+                        for mrca, uv_details in result[child].items():
+                            to_store = MRCAdict.MRCAintervals([], [])
+                            for s, details in zip(to_store, uv_details):
+                                # Odd that we don't use the interval dict here:???
+                                for key, _ in details:
+                                    offset, inverted_relative_to_original = key
+                                    if inverted_relative_to_original:
+                                        s.append(
+                                            (offset - mrca.lower, offset - mrca.upper)
+                                        )
+                                    else:
+                                        s.append(
+                                            (mrca.lower - offset, mrca.upper - offset)
+                                        )
+                            result[child][mrca] = to_store  # replace
 
-                    # Remove the coalesced segments from the interval lists
-                    for uv_dict in (u_dict, v_dict):
-                        for key in uv_dict.keys():
-                            uv_dict[key] -= coalesced
+                        # Remove the coalesced segments from the interval lists
+                        for uv_dict in (u_dict, v_dict):
+                            for key in uv_dict[chromosome].keys():
+                                uv_dict[chromosome][key] -= coalesced
 
             for ie_id in self.iedges.ids_for_child(child):
                 # See note in sample resolve algorithm re efficiency and
@@ -1420,31 +1442,46 @@ class Tables:
                 parent = ie.parent
                 child_ivl = P.closedopen(ie.child_left, ie.child_right)  # cache
                 is_inversion = ie.is_inversion()
-                for u_or_v, interval_dict in enumerate((u_dict, v_dict)):
-                    for (offset, already_inverted), intervals in interval_dict.items():
-                        for interval in intervals:
-                            if c := child_ivl & interval:
-                                p = self.iedges.transform_interval(
-                                    ie_id, (c.lower, c.upper), Const.ROOTWARDS
-                                )
-                                if is_inversion:
-                                    if already_inverted:
-                                        # 0 gets flipped backwards
-                                        x = offset - (c.lower + p[0])
+                for u_or_v, u_or_v_dict in enumerate((u_dict, v_dict)):
+                    for chromosome, interval_dict in u_or_v_dict.items():
+                        if chromosome != ie.child_chromosome:
+                            continue
+                        for (
+                            offset,
+                            already_inverted,
+                        ), intervals in interval_dict.items():
+                            for interval in intervals:
+                                if c := child_ivl & interval:
+                                    p = self.iedges.transform_interval(
+                                        ie_id, (c.lower, c.upper), Const.ROOTWARDS
+                                    )
+                                    if is_inversion:
+                                        if already_inverted:
+                                            # 0 gets flipped backwards
+                                            x = offset - (c.lower + p[0])
+                                        else:
+                                            x = offset + (c.lower + p[0])
+                                        already_inverted = not already_inverted
+                                        parent_ivl = P.closedopen(p[1], p[0])
                                     else:
-                                        x = offset + (c.lower + p[0])
-                                    already_inverted = not already_inverted
-                                    parent_ivl = P.closedopen(p[1], p[0])
-                                else:
-                                    x = offset - c.lower + p[0]
-                                    parent_ivl = P.closedopen(*p)
-                                key = (x, already_inverted)
-                                if parent not in stack:
-                                    stack[parent] = ({}, {})
-                                if key in stack[parent][u_or_v]:
-                                    stack[parent][u_or_v][key] |= parent_ivl
-                                else:
-                                    stack[parent][u_or_v][key] = parent_ivl
+                                        x = offset - c.lower + p[0]
+                                        parent_ivl = P.closedopen(*p)
+                                    key = (x, already_inverted)
+                                    if parent not in stack:
+                                        stack[parent] = ({}, {})
+                                    if (
+                                        ie.parent_chromosome
+                                        not in stack[parent][u_or_v]
+                                    ):
+                                        stack[parent][u_or_v][ie.parent_chromosome] = {}
+                                    if key in stack[parent][u_or_v]:
+                                        stack[parent][u_or_v][ie.parent_chromosome][
+                                            key
+                                        ] |= parent_ivl
+                                    else:
+                                        stack[parent][u_or_v][ie.parent_chromosome][
+                                            key
+                                        ] = parent_ivl
         ret = MRCAdict()
         for mrca_node, interval_dict in result.items():
             ret[mrca_node] = {(k.lower, k.upper): v for k, v in interval_dict.items()}

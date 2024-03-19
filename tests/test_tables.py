@@ -686,7 +686,7 @@ class TestFindMrcas:
         assert gig.sequence_length(0) == degree2_2_tip_ts.sequence_length
         assert gig.sequence_length(1) == degree2_2_tip_ts.sequence_length
         cutoff = (T[[tree0.root, tree1.root]]).mean()
-        shared_regions = gig.tables.find_mrca_regions(0, 1, cutoff)
+        shared_regions = gig.tables.find_mrca_regions(0, 1, time_cutoff=cutoff)
         assert len(shared_regions) == 1
         used_tree = tree0 if T[tree0.root] < T[tree1.root] else tree1
         unused_tree = tree1 if T[tree0.root] < T[tree1.root] else tree0
